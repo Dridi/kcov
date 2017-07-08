@@ -304,10 +304,47 @@ static void *outputThread(void *p)
 	return NULL;
 }
 
+static void daemonize(void)
+{
+	pid_t child;
+
+	child = fork();
+
+	if (child < 0)
+	{
+		panic("Fork failed?\n");
+	}
+	else if (child > 0)
+	{
+		exit(0);
+	}
+	if (setsid() < 0)
+	{
+		exit(1);
+	}
+
+	child = fork();
+
+	if (child < 0)
+	{
+		panic("Fork failed?\n");
+	}
+	else if (child > 0)
+	{
+		exit(0);
+	}
+}
+
+
 int main(int argc, const char *argv[])
 {
 	char buf[4096];
 	const char *path = getenv("KCOV_SYSTEM_DESTINATION_DIR");
+
+	if (argc == 2 && strcmp(argv[1], "-d") == 0)
+	{
+		daemonize();
+	}
 
 	std::string destinationDir = "/tmp/kcov-data";
 
