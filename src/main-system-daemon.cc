@@ -3,6 +3,7 @@
 #include <fcntl.h>
 #include <sched.h>
 #include <pthread.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <stdlib.h>
@@ -90,8 +91,6 @@ public:
 		{
 			panic("Output not created in run(), check implementation\n");
 		}
-
-
 
 		while (1)
 		{
@@ -225,11 +224,31 @@ static void processOne(const std::string &destinationDir, const std::string &fil
 	delete sysFile;
 }
 
+
+// https://stackoverflow.com/questions/1486833/pthread-cond-timedwait-help
+static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+static void waitCond(unsigned secs)
+{
+    struct timespec timeToWait;
+    struct timeval now;
+
+    gettimeofday(&now,NULL);
+
+    timeToWait.tv_sec = now.tv_sec + secs;
+    timeToWait.tv_nsec = now.tv_usec;
+
+    pthread_mutex_lock(&mutex);
+    pthread_cond_timedwait(&cond, &mutex, &timeToWait);
+    pthread_mutex_unlock(&mutex);
+}
+
 static bool doExit = false;
 static void onExitSignal(int sig)
 {
 	// Forward the signal to the traced program
 	doExit = true;
+	pthread_cond_signal(&cond);
 }
 
 static void *outputThread(void *p)
@@ -241,13 +260,13 @@ static void *outputThread(void *p)
 
 	while (1)
 	{
+		// Write data every two seconds
+		waitCond(2);
+
 		if (doExit)
 		{
 			break;
 		}
-
-		// Write data every two seconds
-		sleep(2);
 
 		// Copy to a list to process
 		std::vector<std::pair<uint32_t, kcov_system_mode::system_mode_memory *>> toProcess;
@@ -304,6 +323,7 @@ static void *outputThread(void *p)
 	return NULL;
 }
 
+// https://stackoverflow.com/questions/17954432/creating-a-daemon-in-linux/17955149#17955149
 static void daemonize(void)
 {
 	pid_t child;
@@ -316,12 +336,17 @@ static void daemonize(void)
 	}
 	else if (child > 0)
 	{
+		// Parent
 		exit(0);
 	}
 	if (setsid() < 0)
 	{
 		exit(1);
 	}
+
+	// Ignore signals
+	signal(SIGCHLD, SIG_IGN);
+    signal(SIGHUP, SIG_IGN);
 
 	child = fork();
 
@@ -331,20 +356,37 @@ static void daemonize(void)
 	}
 	else if (child > 0)
 	{
+		// Parent
 		exit(0);
 	}
+
+	close(fileno(stdin));
+	close(fileno(stderr));
+	close(fileno(stdout));
 }
 
 
 int main(int argc, const char *argv[])
 {
-	char buf[4096];
-	const char *path = getenv("KCOV_SYSTEM_DESTINATION_DIR");
+	std::string pidFile = "/tmp/kcov-system.pid";
 
+	if (file_exists(pidFile))
+	{
+		fprintf(stderr, "%s already exists, indicating an already running daemon\n"
+				"Remove the file if this is incorrect\n", pidFile.c_str());
+		exit(1);
+	}
+
+	const char *path = getenv("KCOV_SYSTEM_DESTINATION_DIR");
 	if (argc == 2 && strcmp(argv[1], "-d") == 0)
 	{
 		daemonize();
 	}
+
+	// Create PID-file
+	char pid[256];
+	snprintf(pid, sizeof(pid), "%d", getpid());
+	write_file(pid, strlen(pid) + 1, "%s", pidFile.c_str());
 
 	std::string destinationDir = "/tmp/kcov-data";
 
@@ -360,6 +402,7 @@ int main(int argc, const char *argv[])
 	if (fd < 0)
 	{
 		fprintf(stderr, "Can't open fifo %s\n", pipePath);
+		unlink(pidFile.c_str());
 		exit(1);
 	}
 
@@ -372,6 +415,8 @@ int main(int argc, const char *argv[])
 
 	while (1)
 	{
+		char buf[4096];
+
 		if (doExit)
 		{
 			break;
@@ -382,6 +427,15 @@ int main(int argc, const char *argv[])
 		if (r <= 0)
 		{
 			continue;
+		}
+
+		// Handle stopping requests
+		std::string stopCommand = "STOPME";
+		if (r >= (int)stopCommand.size() &&
+				strncmp(stopCommand.c_str(), buf, stopCommand.size()) == 0)
+		{
+			doExit = 1;
+			break;
 		}
 
 		if (r < (int)sizeof(struct new_process_entry))
@@ -404,8 +458,13 @@ int main(int argc, const char *argv[])
 		// Write a character to let the process loose again
 		write_file(buf, 1, "%s/%d", destinationDir.c_str(), pid);
 	}
+	pthread_cond_signal(&cond);
 
 	// Wait for the reporter thread
 	void *rv;
 	pthread_join(thread, &rv);
+
+	close(fd);
+	unlink(pipePath);
+	unlink(pidFile.c_str());
 }
