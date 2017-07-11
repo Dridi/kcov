@@ -110,6 +110,13 @@ run-tests-osx-clang: build-osx
 run-tests: run-tests-${TRAVIS_OS_NAME}-${CC}
 
 
+install_patchelf:
+	mkdir -p patchelf
+	cd patchelf/ && wget https://github.com/NixOS/patchelf/archive/0.9.tar.gz
+	cd patchelf && tar -xf *.tar.gz
+	cd patchelf/patchelf-0.9 && ./bootstrap.sh && ./configure
+	cd patchelf/patchelf-0.9 && make && sudo make install
+
 prepare_osx_clang:
 
 prepare_osx_gcc:
@@ -120,7 +127,7 @@ prepare_osx:
 	brew install python3
 	brew install bash
 
-prepare_linux:
+prepare_linux: install_patchelf
 	sudo sh -c "echo 0 > /proc/sys/kernel/yama/ptrace_scope"
 	sudo add-apt-repository ppa:jonlar/crpcut -y
 	sudo apt-get update -q
